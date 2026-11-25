@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Editor / OS
+.vscode/
+CLAUDE.md
+.DS_Store
+.env
+
+# Experiment outputs
+wandb/
+runs/
+lightning_logs/
+tensorboard/
+events.out.tfevents.*
+*.log
+*.err
+*.pt
+*.pth
+*.ckpt
+*.joblib
+*.pkl
+
+# Model checkpoints (never commit weights)
+*.pt.tar
+*.bin
+*.safetensors
+*.onnx
+*.gguf
+.cache/
+
+# downstream: ignore everything for now
+downstream/**
+
+# preprocessing: ignore everything for now
+preprocessing/**
+
+# Data
+*.h5
+*.hdf5
+*.ndpi
+*.svs
+*.csv
+*.parquet
+*.feather
+*.xlsx
+*.npy
+*.npz
+*.tiff
+*.tif
+*.vms
+*.vmu
+*.scn
+*.mrxs
+*.svslide
+*.bif
+*.jpg
+*.jpeg
+*.png
