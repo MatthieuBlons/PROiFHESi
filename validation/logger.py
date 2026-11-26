@@ -10,6 +10,8 @@ from __future__ import annotations
 # General libraries
 import logging
 import time
+import torch 
+from argparse import Namespace
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,3 +79,48 @@ class timetracker:
             )
 
         return elapsed
+
+def resolve_device(args: Namespace) -> str:
+    """
+    Resolve the compute device passed to each training run.
+
+    Explicit --device takes precedence. Otherwise, --gpu requests
+    CUDA, optionally with a selected device index. If no device option is
+    provided, CUDA is used when available and CPU otherwise.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Launcher arguments.
+
+    Returns
+    -------
+    str
+        Resolved PyTorch device string.
+    """
+    if args.device is not None:
+        if "cuda" in args.device and not torch.cuda.is_available():
+            LOGGER.warning("CUDA was requested but is unavailable; using CPU.")
+            return "cpu"
+        return args.device
+
+    if args.gpu:
+        if not torch.cuda.is_available():
+            LOGGER.warning("CUDA was requested but is unavailable; using CPU.")
+            return "cpu"
+
+        if args.gpu_id is None:
+            return "cuda"
+
+        if args.gpu_id >= torch.cuda.device_count():
+            raise ValueError(
+                f"CUDA device {args.gpu_id} was requested, but only "
+                f"{torch.cuda.device_count()} device(s) are available."
+            )
+
+        return f"cuda:{args.gpu_id}"
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    return "cpu"

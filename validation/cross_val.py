@@ -43,7 +43,7 @@ from tqdm.auto import tqdm
 from finetuning.arguments import load_yaml_config
 from finetuning.test import test_model
 from finetuning.train import main as train_single_run
-from validation.logger import configure_logging, timetracker
+from validation.logger import configure_logging, timetracker, resolve_device
 from validation.write_results import (
     MEAN_VALIDATION_FILE,
     TEST_METRICS_FILE,
@@ -234,50 +234,7 @@ def parse_job_arguments(
     return args
 
 
-def resolve_device(args: Namespace) -> str:
-    """
-    Resolve the compute device passed to each training run.
 
-    Explicit --device takes precedence. Otherwise, --gpu requests
-    CUDA, optionally with a selected device index. If no device option is
-    provided, CUDA is used when available and CPU otherwise.
-
-    Parameters
-    ----------
-    args : argparse.Namespace
-        Launcher arguments.
-
-    Returns
-    -------
-    str
-        Resolved PyTorch device string.
-    """
-    if args.device is not None:
-        if "cuda" in args.device and not torch.cuda.is_available():
-            LOGGER.warning("CUDA was requested but is unavailable; using CPU.")
-            return "cpu"
-        return args.device
-
-    if args.gpu:
-        if not torch.cuda.is_available():
-            LOGGER.warning("CUDA was requested but is unavailable; using CPU.")
-            return "cpu"
-
-        if args.gpu_id is None:
-            return "cuda"
-
-        if args.gpu_id >= torch.cuda.device_count():
-            raise ValueError(
-                f"CUDA device {args.gpu_id} was requested, but only "
-                f"{torch.cuda.device_count()} device(s) are available."
-            )
-
-        return f"cuda:{args.gpu_id}"
-
-    if torch.cuda.is_available():
-        return "cuda"
-
-    return "cpu"
 
 
 def resolve_job_name(job_name: str | None) -> str:
