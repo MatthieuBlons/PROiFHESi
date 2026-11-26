@@ -30,13 +30,15 @@ regression
 Supported augmentations (training only, see `build_augmentations`)
 -----------------------
 spatial : horizontal / vertical flips, 90 degree rotations
-color   : brightness-contrast, Gaussian blur, Gaussian noise
+color   : HED stain jitter (optional, `HEDStainAugment`), brightness-contrast,
+          Gaussian blur, sharpening, Gaussian noise, JPEG compression
 """
 
 from __future__ import annotations
 
 # General libraries
 import logging
+import random
 from argparse import Namespace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
@@ -49,6 +51,7 @@ import pandas as pd
 import torch
 import torchvision.transforms as T
 from PIL import Image
+from skimage.color import hed_from_rgb, rgb_from_hed
 from sklearn.model_selection import ShuffleSplit
 from torch.utils.data import DataLoader, Dataset, Sampler, SubsetRandomSampler
 
@@ -72,6 +75,125 @@ SIGNATURE_IMAGE_KEY = "img_path"
 # -----------------------------------------------------------------------------
 
 
+class HEDStainAugment(A.ImageOnlyTransform):
+    """
+    HED stain jitter (Tellez et al., IEEE TMI 2018; MedIA 2019).
+
+    The tile is converted to optical density (OD), projected on the fixed
+    Ruifrok & Johnston H / E / DAB stain vectors, the H and E concentrations
+    are perturbed, and the tile is reconstructed:
+
+        C'_s = alpha_s * C_s + beta_s,  s in {H, E}
+        alpha_s ~ U(1 - sigma_alpha, 1 + sigma_alpha)
+        beta_s  ~ U(-sigma_beta, sigma_beta)
+
+    Parameters
+    ----------
+    sigma_alpha : float
+        Half-width of the multiplicative (stain amount) jitter.
+    sigma_beta : float
+        Half-width of the additive jitter on concentrations. 0 disables it.
+    od_threshold : float
+        Pixels whose maximum OD over RGB channels is below this value are
+        treated as background and left unchanged. 0 perturbs every pixel.
+    p : float
+        Probability of applying the transform.
+    always_apply : bool | None
+        Albumentations 1.4 argument, kept for API compatibility.
+
+    Notes
+    -----
+    The DAB channel (residual on H&E) is never perturbed: jittering it gives
+    brownish artefacts. Leaving the background unchanged and `sigma_beta=0`
+    avoid tinting the glass. With `alpha = 1` and `beta = 0` the transform is
+    the identity (up to uint8 rounding).
+    """
+
+    STAIN_TO_OD = rgb_from_hed.astype(np.float32)
+    OD_TO_STAIN = hed_from_rgb.astype(np.float32)
+    PERTURBED_STAINS = 2  # H and E
+
+    def __init__(
+        self,
+        sigma_alpha: float = 0.05,
+        sigma_beta: float = 0.0,
+        od_threshold: float = 0.15,
+        always_apply: bool | None = None,
+        p: float = 0.5,
+    ) -> None:
+        super().__init__(
+            always_apply=always_apply,
+            p=p,
+        )
+        if not 0.0 <= sigma_alpha < 1.0:
+            raise ValueError(
+                f"`sigma_alpha` must be in [0, 1), got {sigma_alpha}."
+            )
+        if sigma_beta < 0.0:
+            raise ValueError(f"`sigma_beta` cannot be negative, got {sigma_beta}.")
+        if od_threshold < 0.0:
+            raise ValueError(
+                f"`od_threshold` cannot be negative, got {od_threshold}."
+            )
+        self.sigma_alpha = sigma_alpha
+        self.sigma_beta = sigma_beta
+        self.od_threshold = od_threshold
+
+    def get_params(self) -> dict[str, Any]:
+        alpha = [
+            random.uniform(
+                1.0 - self.sigma_alpha,
+                1.0 + self.sigma_alpha,
+            )
+            for _ in range(self.PERTURBED_STAINS)
+        ]
+        beta = [
+            random.uniform(
+                -self.sigma_beta,
+                self.sigma_beta,
+            )
+            for _ in range(self.PERTURBED_STAINS)
+        ]
+        return {
+            "alpha": np.asarray(alpha, dtype=np.float32),
+            "beta": np.asarray(beta, dtype=np.float32),
+        }
+
+    def apply(
+        self,
+        img: np.ndarray,
+        alpha: np.ndarray,
+        beta: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
+        if img.dtype != np.uint8 or img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(
+                "`HEDStainAugment` expects uint8 RGB images (H, W, 3), "
+                f"got {img.dtype} {img.shape}."
+            )
+        shape = img.shape
+        pixels = img.reshape(-1, 3).astype(np.float32)
+        optical_density = -np.log((pixels + 1.0) / 256.0)
+        concentrations = optical_density @ self.OD_TO_STAIN
+
+        tissue = optical_density.max(axis=1) > self.od_threshold
+        n_stains = self.PERTURBED_STAINS
+        concentrations[tissue, :n_stains] = (
+            concentrations[tissue, :n_stains] * alpha + beta
+        )
+
+        optical_density = concentrations @ self.STAIN_TO_OD
+        image = 256.0 * np.exp(-optical_density) - 1.0
+        return np.clip(np.rint(image), 0, 255).astype(np.uint8).reshape(shape)
+
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
+        return (
+            "sigma_alpha",
+            "sigma_beta",
+            "od_threshold",
+        )
+
+
 def build_augmentations(
     args: Namespace,
     training: bool,
@@ -83,8 +205,11 @@ def build_augmentations(
     ----------
     args : argparse.Namespace
         Resolved configuration. Uses `augment` and the probabilities
-        `p_hflip`, `p_vflip`, `p_rotate90`, `p_brightness_contrast`,
-        `p_blur`, `p_noise`.
+        `p_hflip`, `p_vflip`, `p_rotate90`, `p_hed`, `p_brightness_contrast`,
+        `p_blur`, `p_sharpen`, `p_noise`, `p_compression`. `p_hed` also reads
+        `hed_sigma_alpha`, `hed_sigma_beta` and `hed_od_threshold`.
+        `p_hed`, `p_sharpen` and `p_compression` default to 0 when missing
+        (configurations older than these options).
     training : bool
         Augmentations are only built for training datasets.
 
@@ -95,12 +220,26 @@ def build_augmentations(
 
     Notes
     -----
-    `GaussNoise(var_limit=(0.05, 0.1))` uses the albumentations 1.4 API
-    (variance in pixel units): on uint8 tiles its effect is negligible.
-    An HED color augmentation is a candidate addition.
+    The HED stain jitter runs before the other color transforms, on the
+    unaltered tile colors. Blur and sharpening mirror each other (scanner
+    focus / post-processing). `GaussNoise(var_limit=(10, 50))` uses the
+    albumentations 1.4 API (variance in grey levels, std about 3 to 7).
+    JPEG compression runs last, as in an acquisition pipeline.
     """
     if not training or not args.augment:
         return None
+
+    p_hed = getattr(args, "p_hed", 0.0) or 0.0
+    stain_augmentations = []
+    if p_hed > 0.0:
+        stain_augmentations.append(
+            HEDStainAugment(
+                sigma_alpha=getattr(args, "hed_sigma_alpha", 0.05),
+                sigma_beta=getattr(args, "hed_sigma_beta", 0.0),
+                od_threshold=getattr(args, "hed_od_threshold", 0.15),
+                p=p_hed,
+            )
+        )
 
     return A.Compose(
         [
@@ -109,6 +248,7 @@ def build_augmentations(
             A.VerticalFlip(p=args.p_vflip),
             A.RandomRotate90(p=args.p_rotate90),
             # Color
+            *stain_augmentations,
             A.RandomBrightnessContrast(
                 brightness_limit=0.2,
                 contrast_limit=0.2,
@@ -119,9 +259,19 @@ def build_augmentations(
                 sigma_limit=(0.1, 1.5),
                 p=args.p_blur,
             ),
+            A.Sharpen(
+                alpha=(0.1, 0.3),
+                lightness=(1.0, 1.0),
+                p=getattr(args, "p_sharpen", 0.0) or 0.0,
+            ),
             A.GaussNoise(
-                var_limit=(0.05, 0.1),
+                var_limit=(10.0, 50.0),
                 p=args.p_noise,
+            ),
+            A.ImageCompression(
+                quality_range=(60, 95),
+                compression_type="jpeg",
+                p=getattr(args, "p_compression", 0.0) or 0.0,
             ),
         ]
     )

@@ -96,9 +96,12 @@ AUGMENTATION_PROBABILITIES = (
     "p_hflip",
     "p_vflip",
     "p_rotate90",
+    "p_hed",
     "p_brightness_contrast",
     "p_blur",
+    "p_sharpen",
     "p_noise",
+    "p_compression",
 )
 
 PATH_ARGUMENTS = (
@@ -546,6 +549,17 @@ def validate_training_parameters(args: Namespace) -> Namespace:
         if value is not None and not 0.0 <= value <= 1.0:
             raise ValueError(f"`{name}` must be in [0, 1], got {value}.")
 
+    if not 0.0 <= args.hed_sigma_alpha < 1.0:
+        raise ValueError(
+            f"`hed_sigma_alpha` must be in [0, 1), got {args.hed_sigma_alpha}."
+        )
+
+    if args.hed_sigma_beta < 0.0 or args.hed_od_threshold < 0.0:
+        raise ValueError(
+            "`hed_sigma_beta` and `hed_od_threshold` cannot be negative, got "
+            f"{args.hed_sigma_beta} and {args.hed_od_threshold}."
+        )
+
     if not 0.0 <= args.dropout < 1.0:
         raise ValueError(f"`dropout` must be in [0, 1), got {args.dropout}.")
 
@@ -778,6 +792,31 @@ def build_parser(train: bool = True) -> ArgumentParser:
         help="Probability of a random 90 degree rotation.",
     )
     parser.add_argument(
+        "--p_hed",
+        type=float,
+        default=0.5,
+        help="Probability of an HED stain jitter (0 disables it).",
+    )
+    parser.add_argument(
+        "--hed_sigma_alpha",
+        type=float,
+        default=0.2,
+        help="HED jitter: H and E amounts scaled by U(1 - s, 1 + s).",
+    )
+    parser.add_argument(
+        "--hed_sigma_beta",
+        type=float,
+        default=0.05,
+        help="HED jitter: H and E concentrations shifted by U(-s, s).",
+    )
+    parser.add_argument(
+        "--hed_od_threshold",
+        type=float,
+        default=0.15,
+        help="HED jitter: pixels with max optical density below it are left "
+        "unchanged (background).",
+    )
+    parser.add_argument(
         "--p_brightness_contrast",
         type=float,
         default=0.5,
@@ -793,7 +832,19 @@ def build_parser(train: bool = True) -> ArgumentParser:
         "--p_noise",
         type=float,
         default=0.1,
-        help="Probability of Gaussian noise.",
+        help="Probability of Gaussian noise (std about 3 to 7 grey levels).",
+    )
+    parser.add_argument(
+        "--p_sharpen",
+        type=float,
+        default=0.1,
+        help="Probability of a sharpening (mirror of the Gaussian blur).",
+    )
+    parser.add_argument(
+        "--p_compression",
+        type=float,
+        default=0.1,
+        help="Probability of a JPEG re-compression (quality 60 to 95).",
     )
 
     # -------------------------------------------------------------------------
@@ -825,7 +876,7 @@ def build_parser(train: bool = True) -> ArgumentParser:
     parser.add_argument(
         "--lora",
         action=BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Fine-tune the encoder with LoRA (frozen encoder otherwise).",
     )
     parser.add_argument(
@@ -843,8 +894,8 @@ def build_parser(train: bool = True) -> ArgumentParser:
     parser.add_argument(
         "--lora_target",
         type=str,
-        nargs="+",
-        default=["qkv"],
+        nargs="*",
+        default=None,
         help="Encoder modules targeted by LoRA.",
     )
 
