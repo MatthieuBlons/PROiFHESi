@@ -171,7 +171,7 @@ INEQUALITY_CONSTRAINTS = [
     ("CD3e+", "CD45+"),
     ("CD20+", "CD45+"),
     ("CD68+", "CD45+"),
-    # --- Myeloid ---
+    # --- Macrophage ---
     ("CD163+", "CD68+"),
     ("CD163+", "CD45+"),
     # --- T cell hierarchy ---
@@ -188,7 +188,7 @@ INEQUALITY_CONSTRAINTS = [
     ("PD1+", "CD3e+"),
     ("PD1+", "CD45+"),
     # --- Epithelial ---
-    ("Ecadherin+", "PanCK+"),
+    # ("Ecadherin+", "PanCK+"),
 ]
 
 marker_to_idx = {
