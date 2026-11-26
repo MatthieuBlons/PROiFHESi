@@ -41,6 +41,8 @@ downstream/**
 preprocessing/**
 
 # Data
+local_*
+*.sh
 *.h5
 *.hdf5
 *.ndpi
